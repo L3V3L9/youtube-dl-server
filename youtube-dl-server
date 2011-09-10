@@ -6,8 +6,11 @@
 # TODO:  * Queue for downloading, converting
 #        * Support for other OSes
 import sys, os, threading, time, webbrowser, re
-
 import imp, subprocess, shlex
+
+QueueFileLock = threading.Lock()
+QueueProcessorAlive = 1
+QUEUE_FILENAME = "youtube-q.txt"
 
 from urlparse import urlparse
 from BaseHTTPServer import BaseHTTPRequestHandler, HTTPServer
@@ -35,7 +38,7 @@ try:
   VideoPath = regexVideo.findall(paths)[0].replace("$HOME",userhome)
   MusicPath = regexMusic.findall(paths)[0].replace("$HOME",userhome)
 except IOError:
-  VideoPath = os.path.join(userhome, "Video")
+  VideoPath = os.path.join(userhome, "Movies")
   MusicPath = os.path.join(userhome, "Music")
 
 def Notify(text):
@@ -94,6 +97,16 @@ class StoppableHttpServerRequestHandler(BaseHTTPRequestHandler):
         self._sendHeader(200, 'text/plain')
         self.wfile.write('Server kill request received')
         self.server.shouldRun = False
+        global QueueProcessorAlive
+        QueueProcessorAlive = 0
+        return
+      elif (self.path == '/queue'):
+        QueueFileLock.acquire()
+        self._sendHeader(200,'text/plain')
+        f = open(QUEUE_FILENAME,'r')
+        self.wfile.write(f.read())
+        f.close()
+        QueueFileLock.release()
         return
       elif self._tryResponse("music", Music):
         pass
@@ -125,31 +138,70 @@ class StoppableHttpServerRequestHandler(BaseHTTPRequestHandler):
 class Music(threading.Thread):
   def __init__(self, url):
     self.url = urlparse(url).query.replace("music=","")
-    self.command = 'youtube-dl -t "%s" -T mp3 -C rm <filepath>' % self.url
+    self.command = '~/youtube-dl.sh -t "%s" -T mp3 -C rm <filepath>' % self.url
     Notify('Downloading of "'+ self.url+'" started')
     threading.Thread.__init__(self)
 
   def run(self):
     subprocess.call(shlex.split(self.command))
-
+ 
 ##Video handler
 class Video(threading.Thread):
   def __init__(self, url):
-    self.url = urlparse(url).query.replace("video=","")
-    self.command = 'youtube-dl -t "%s" -T mp4 -C rm <filepath>' % self.url
+    self.url = url
     Notify('Downloading of "'+ self.url+'" started')
     threading.Thread.__init__(self)
 
   def run(self):
-    subprocess.call(shlex.split(self.command))
+    QueueFileLock.acquire()
+    f = open(QUEUE_FILENAME,'r')
+    lines = f.readlines()
+    f.close()
+    f = open(QUEUE_FILENAME,'w')
+    lines.append(self.url+"\n")
+    f.writelines(lines)
+    f.close()
+    QueueFileLock.release()
+
+class QueueProcessor(threading.Thread):
+  def __init__(self):
+    global QueueProcessorAlive
+    QueueProcessorAlive = 1
+    threading.Thread.__init__(self)
+  def run(self):
+    global QueueProcessorAlive,QueueFileLock
+    while QueueProcessorAlive:
+      QueueFileLock.acquire()
+      f = open(QUEUE_FILENAME,'r')
+      lines = f.readlines()
+      f.close()
+      QueueFileLock.release()
+      if len(lines):
+        url = lines[0]
+        url = urlparse(url).query.replace("video=","")
+        command = 'youtube-dl -t "%s" ' % url
+        subprocess.call(shlex.split(command))
+        QueueFileLock.acquire()
+        f = open(QUEUE_FILENAME,'r')
+        lines = f.readlines()
+        f.close()
+        f = open(QUEUE_FILENAME,'w')
+        lines = lines[1:]
+        f.writelines(lines)
+        f.close()
+        QueueFileLock.release()
+
 
 ## Main routine ##
 def main():
-  try:
-    server = ServerThread(9099)
-    server.start()
-  except:
-    sys.exit(0)
+  #try:
+  qp = QueueProcessor()
+  qp.start()
+  server = ServerThread(9099)
+  server.start()
+ # except:
+  #sys.exit(0)
 
 if __name__ == '__main__':
     main()
+
